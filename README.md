@@ -29,10 +29,12 @@ cd gemini-data-wrangler
 npm run install:all
 ```
 
-3. Set up environment variables:
+3. Set up environment variables (optional but recommended):
 ```bash
 cp server/.env.example server/.env
 # Edit server/.env and add your GEMINI_API_KEY
+# If set, this will be used as the default API key
+# Users can still override it via the UI
 ```
 
 4. Start the development servers:

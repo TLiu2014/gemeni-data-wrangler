@@ -1,17 +1,22 @@
 import { useState } from 'react';
 import { Key, Check } from 'lucide-react';
+import { useTheme } from './ThemeProvider';
 
 interface Props {
   onApiKeySet: (apiKey: string) => void;
   currentApiKey: string | null;
+  hasDefaultApiKey?: boolean;
 }
 
-export function ApiKeyInput({ onApiKeySet, currentApiKey }: Props) {
+export function ApiKeyInput({ onApiKeySet, currentApiKey, hasDefaultApiKey = false }: Props) {
+  const { themeConfig } = useTheme();
   const [apiKey, setApiKey] = useState(currentApiKey || '');
   const [isVisible, setIsVisible] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = (e?: React.FormEvent) => {
+    if (e) {
+      e.preventDefault();
+    }
     if (apiKey.trim()) {
       onApiKeySet(apiKey.trim());
       setIsVisible(false);
@@ -22,92 +27,139 @@ export function ApiKeyInput({ onApiKeySet, currentApiKey }: Props) {
     setApiKey(e.target.value);
   };
 
-  if (!isVisible && currentApiKey) {
+  // When used in settings panel, always show the form
+  // When API key is set, show a status indicator
+  if (currentApiKey && !isVisible) {
     return (
-      <div style={{ position: 'relative', zIndex: 10 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+        <div style={{ 
+          display: 'flex', 
+          alignItems: 'center', 
+          gap: '8px',
+          padding: '8px 12px',
+          background: themeConfig.colors.success + '20',
+          borderRadius: '6px',
+          border: `1px solid ${themeConfig.colors.success}`
+        }}>
+          <Check size={16} style={{ color: themeConfig.colors.success }} />
+          <span style={{ fontSize: '14px', color: themeConfig.colors.text }}>
+            API Key is set
+          </span>
+        </div>
         <button
           onClick={() => setIsVisible(true)}
           style={{
             padding: '8px 12px',
-            background: '#10b981',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
+            background: themeConfig.colors.surface,
+            color: themeConfig.colors.text,
+            border: `1px solid ${themeConfig.colors.border}`,
+            borderRadius: '6px',
             cursor: 'pointer',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '6px',
-            fontSize: '14px'
+            fontSize: '13px',
+            transition: 'all 0.2s'
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = themeConfig.colors.surfaceElevated;
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = themeConfig.colors.surface;
           }}
         >
-          <Check size={16} />
-          API Key Set
+          Change API Key
         </button>
       </div>
     );
   }
 
   return (
-    <div style={{ position: 'relative', zIndex: 10, background: 'white', padding: '12px', borderRadius: '8px', boxShadow: '0 2px 8px rgba(0,0,0,0.1)', minWidth: '300px' }}>
-      <form onSubmit={handleSubmit} style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-          <label style={{ fontSize: '12px', color: '#666', display: 'flex', alignItems: 'center', gap: '4px' }}>
-            <Key size={14} />
-            Gemini API Key
-          </label>
-          <input
-            type="password"
-            value={apiKey}
-            onChange={handleChange}
-            placeholder="Enter your API key"
-            style={{
-              padding: '8px 12px',
-              border: '1px solid #ccc',
-              borderRadius: '4px',
-              fontSize: '14px',
-              width: '250px',
-              outline: 'none'
-            }}
-          />
-        </div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+      <div>
+        <label style={{ 
+          fontSize: '13px', 
+          color: themeConfig.colors.text, 
+          display: 'flex', 
+          alignItems: 'center', 
+          gap: '6px',
+          marginBottom: '8px',
+          fontWeight: '500'
+        }}>
+          <Key size={16} />
+          Gemini API Key
+        </label>
+        <input
+          type="password"
+          value={apiKey}
+          onChange={handleChange}
+          placeholder="Enter your API key"
+          style={{
+            width: '100%',
+            padding: '10px 12px',
+            border: `1px solid ${themeConfig.colors.border}`,
+            borderRadius: '6px',
+            fontSize: '14px',
+            outline: 'none',
+            background: themeConfig.colors.background,
+            color: themeConfig.colors.text,
+            transition: 'border-color 0.2s',
+            boxSizing: 'border-box'
+          }}
+          onFocus={(e) => e.currentTarget.style.borderColor = themeConfig.colors.primary}
+          onBlur={(e) => e.currentTarget.style.borderColor = themeConfig.colors.border}
+        />
+      </div>
+      <div style={{ display: 'flex', gap: '8px' }}>
         <button
-          type="submit"
+          type="button"
+          onClick={handleSubmit}
           disabled={!apiKey.trim()}
           style={{
-            padding: '8px 16px',
-            background: apiKey.trim() ? '#2563eb' : '#ccc',
+            flex: 1,
+            padding: '10px 16px',
+            background: apiKey.trim() ? themeConfig.colors.primary : themeConfig.colors.secondary,
             color: 'white',
             border: 'none',
-            borderRadius: '4px',
+            borderRadius: '6px',
             cursor: apiKey.trim() ? 'pointer' : 'not-allowed',
             fontSize: '14px',
-            marginTop: '20px'
+            fontWeight: '500',
+            transition: 'background 0.2s'
           }}
         >
-          Set
+          {currentApiKey ? 'Update' : 'Set'} API Key
         </button>
         {currentApiKey && (
           <button
             type="button"
             onClick={() => setIsVisible(false)}
             style={{
-              padding: '8px 12px',
-              background: '#6b7280',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
+              padding: '10px 16px',
+              background: themeConfig.colors.surface,
+              color: themeConfig.colors.text,
+              border: `1px solid ${themeConfig.colors.border}`,
+              borderRadius: '6px',
               cursor: 'pointer',
               fontSize: '14px',
-              marginTop: '20px'
+              transition: 'background 0.2s'
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = themeConfig.colors.surfaceElevated;
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = themeConfig.colors.surface;
             }}
           >
             Cancel
           </button>
         )}
-      </form>
-      <div style={{ fontSize: '11px', color: '#666', marginTop: '4px', maxWidth: '300px' }}>
+      </div>
+      <div style={{ fontSize: '12px', color: themeConfig.colors.textSecondary, lineHeight: '1.5' }}>
+        {!currentApiKey && hasDefaultApiKey && (
+          <div style={{ marginBottom: '6px', color: themeConfig.colors.success, fontWeight: '500' }}>
+            ℹ️ Using default API key from server
+          </div>
+        )}
         Get your API key from{' '}
-        <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" style={{ color: '#2563eb' }}>
+        <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" style={{ color: themeConfig.colors.primary }}>
           Google AI Studio
         </a>
       </div>

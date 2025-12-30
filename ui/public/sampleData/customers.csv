@@ -1,0 +1,8 @@
+customer_id,name,region,join_date,status
+101,Alice Johnson,North America,2023-01-15,Active
+102,Bob Smith,Europe,2023-02-20,Inactive
+103,Charlie Davis,Asia,2023-03-05,Active
+104,Diana Evans,North America,2023-04-10,Active
+105,Evan Wright,Europe,2023-05-22,Active
+106,Fiona Chen,Asia,2023-06-30,Active
+107,George Hall,North America,2023-07-01,Inactive

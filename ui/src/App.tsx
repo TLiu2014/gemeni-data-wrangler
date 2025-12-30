@@ -5,10 +5,31 @@ import { SmartTransform } from './SmartTransform';
 import { DynamicChart } from './DynamicChart';
 import { EnhancedVisualizations } from './EnhancedVisualizations';
 import { VisualizationPresets } from './VisualizationPresets';
-import { ApiKeyInput } from './ApiKeyInput';
+// import { TransformationStages } from './TransformationStages'; // Using StageGraphSVG instead
+import { StageGraphFlow } from './StageGraphFlow';
+import { ResizablePanel } from './ResizablePanel';
+import { TableTabs } from './TableTabs';
+import { MenuBar } from './MenuBar';
+import { useTheme } from './ThemeProvider';
+import { validateStage, generatePromptFromStages } from './promptGenerator';
+import { parseSQLToStages } from './sqlParser';
+import { generateSQLFromStage } from './sqlGenerator';
 import { useDropzone } from 'react-dropzone';
 import * as duckdb from '@duckdb/duckdb-wasm';
 import { mockData, mockSchema } from './mockData';
+import type { TableData, TransformationStage } from './types';
+
+// ============================================================================
+// CONFIGURATION: Sample Data Preloading
+// ============================================================================
+// Set this to true to automatically load sample CSV files from src/sampleData
+// when the homepage opens. Set to false to disable preloading.
+// 
+// For development:
+//   - Set PRELOAD_SAMPLE_DATA = true to test with sample data
+//   - Set PRELOAD_SAMPLE_DATA = false to start with empty tables
+// ============================================================================
+const PRELOAD_SAMPLE_DATA = true;
 
 // Error Boundary Component
 class ErrorBoundary extends Component<{ children: ReactNode; fallback?: ReactNode }, { hasError: boolean; error: Error | null }> {
@@ -34,10 +55,12 @@ class ErrorBoundary extends Component<{ children: ReactNode; fallback?: ReactNod
 }
 
 function App() {
+  const { themeConfig } = useTheme();
   const [db, setDb] = useState<duckdb.AsyncDuckDB | null>(null);
   const [conn, setConn] = useState<duckdb.AsyncDuckDBConnection | null>(null);
-  const [rows, setRows] = useState<any[]>([]);
-  const [schema, setSchema] = useState<any[]>([]); // Current columns
+  const [tables, setTables] = useState<TableData[]>([]);
+  const [activeTableId, setActiveTableId] = useState<string | null>(null);
+  const [transformationStages, setTransformationStages] = useState<TransformationStage[]>([]);
   const [chartConfig, setChartConfig] = useState<any>(null); // From Gemini
   const [status, setStatus] = useState('Initializing Engine...');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -45,16 +68,139 @@ function App() {
     // Load from localStorage if available
     return localStorage.getItem('gemini_api_key');
   });
+  const [hasDefaultApiKey, setHasDefaultApiKey] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [editingStageId, setEditingStageId] = useState<string | null>(null);
+  const [newStage, setNewStage] = useState<TransformationStage | null>(null);
+  const [chatPrompt, setChatPrompt] = useState<string>('');
+  const [sampleDataLoaded, setSampleDataLoaded] = useState(false);
+  const [showVisualizationPresets, setShowVisualizationPresets] = useState<boolean>(() => {
+    // Load from localStorage, default to true
+    const saved = localStorage.getItem('show_visualization_presets');
+    return saved !== null ? saved === 'true' : true;
+  });
+
+  // Get current active table data
+  const activeTable = tables.find(t => t.id === activeTableId);
+  const rows = activeTable?.rows || [];
+  const schema = activeTable?.schema || [];
+
+  // Load sample CSV files
+  const loadSampleData = async () => {
+    if (!db || !conn) return;
+    
+    const sampleFiles = [
+      { name: 'customers.csv', path: '/sampleData/customers.csv' },
+      { name: 'orders.csv', path: '/sampleData/orders.csv' }
+    ];
+    
+    for (const fileInfo of sampleFiles) {
+      try {
+        setStatus(`Loading sample data: ${fileInfo.name}...`);
+        
+        // Try to fetch from public folder first, then try src path
+        let csvText: string | null = null;
+        
+        try {
+          const response = await fetch(fileInfo.path);
+          if (response.ok) {
+            csvText = await response.text();
+          }
+        } catch (e) {
+          // Try alternative path
+          try {
+            const altResponse = await fetch(`/src/sampleData/${fileInfo.name}`);
+            if (altResponse.ok) {
+              csvText = await altResponse.text();
+            }
+          } catch (e2) {
+            console.warn(`Could not load ${fileInfo.name}, skipping...`);
+            continue;
+          }
+        }
+        
+        if (!csvText) {
+          console.warn(`Could not load ${fileInfo.name}, skipping...`);
+          continue;
+        }
+        
+        // Convert CSV text to File object
+        const blob = new Blob([csvText], { type: 'text/csv' });
+        const file = new File([blob], fileInfo.name, { type: 'text/csv' });
+        
+        // Generate table name from filename
+        const tableName = `table_${fileInfo.name.replace(/[^a-zA-Z0-9]/g, '_').replace(/\.[^.]*$/, '')}`;
+        const tableId = `table_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        
+        const { schema, rows } = await loadFileAsTable(file, tableName);
+        
+        // Create table data object
+        const newTable: TableData = {
+          id: tableId,
+          name: tableName,
+          fileName: fileInfo.name,
+          schema,
+          rows,
+          createdAt: new Date()
+        };
+        
+        // Add to tables list
+        setTables(prev => [...prev, newTable]);
+        
+        // Set as active if it's the first table
+        setActiveTableId(prev => prev || tableId);
+        
+        // Add LOAD stage
+        const loadStage: TransformationStage = {
+          id: `stage_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+          type: 'LOAD',
+          description: `Loaded table "${tableName}" from sample file "${fileInfo.name}"`,
+          timestamp: new Date(),
+          data: {
+            tableName,
+            fileName: fileInfo.name
+          }
+        };
+        setTransformationStages(prev => [...prev, loadStage]);
+      } catch (err) {
+        console.warn(`Error loading sample file ${fileInfo.name}:`, err);
+      }
+    }
+    
+    setStatus('Sample data loaded. Ready for transformations.');
+  };
 
   useEffect(() => {
     initDB().then(async (database) => {
       setDb(database);
       const connection = await database.connect();
       setConn(connection);
-      setStatus('Ready for data.');
+      setStatus('Loading sample data...');
     });
+
+    // Check if server has default API key
+    fetch('/api/config')
+      .then(res => res.json())
+      .then(data => {
+        setHasDefaultApiKey(data.hasDefaultApiKey);
+        if (data.hasDefaultApiKey && !apiKey) {
+          setStatus('Ready for data. (Using default API key from server)');
+        }
+      })
+      .catch(err => console.warn('Could not fetch server config:', err));
   }, []);
+
+  // Load sample data when database and connection are ready (only once)
+  useEffect(() => {
+    if (PRELOAD_SAMPLE_DATA && db && conn && !sampleDataLoaded) {
+      loadSampleData().then(() => {
+        setSampleDataLoaded(true);
+      });
+    } else if (!PRELOAD_SAMPLE_DATA && db && conn) {
+      // If preloading is disabled, just set status
+      setStatus('Ready for data.');
+    }
+  }, [db, conn, sampleDataLoaded]);
 
   const handleApiKeySet = (key: string) => {
     setApiKey(key);
@@ -89,17 +235,14 @@ function App() {
     return result;
   };
 
-  const onDrop = async (acceptedFiles: File[]) => {
-    if (!db || !conn) return;
-    const file = acceptedFiles[0];
-    setStatus(`Loading ${file.name}...`);
-    setError(null);
-
-    const internalFileName = 'uploaded_data.csv';
+  const loadFileAsTable = async (file: File, tableName: string): Promise<{ schema: any[]; rows: any[] }> => {
+    if (!db || !conn) throw new Error('Database not initialized');
+    
+    const internalFileName = `table_${tableName}.csv`;
     let success = false;
     let lastError: Error | null = null;
 
-    // Method 1: Try registerFileHandle (most direct)
+    // Method 1: Try registerFileHandle
     try {
       await db.registerFileHandle(
         internalFileName, 
@@ -109,16 +252,15 @@ function App() {
       );
       
       await conn.query(`
-        CREATE OR REPLACE TABLE data_source AS 
+        CREATE OR REPLACE TABLE ${tableName} AS 
         SELECT * FROM read_csv_auto('${internalFileName}', header=true, auto_detect=true)
       `);
       
       success = true;
     } catch (error1) {
       lastError = error1 instanceof Error ? error1 : new Error(String(error1));
-      console.warn('Method 1 (registerFileHandle) failed, trying method 2...');
       
-      // Method 2: Read file as text and register as new file
+      // Method 2: Read file as text
       try {
         const fileText = await file.text();
         const textBlob = new Blob([fileText], { type: 'text/csv' });
@@ -132,18 +274,16 @@ function App() {
         );
         
         await conn.query(`
-          CREATE OR REPLACE TABLE data_source AS 
+          CREATE OR REPLACE TABLE ${tableName} AS 
           SELECT * FROM read_csv_auto('${internalFileName}', header=true, auto_detect=true)
         `);
         
         success = true;
       } catch (error2) {
         lastError = error2 instanceof Error ? error2 : new Error(String(error2));
-        console.warn('Method 2 (file text) failed, trying method 3...');
         
-        // Method 3: Parse CSV manually and insert directly (most reliable fallback)
+        // Method 3: Manual parse
         try {
-          setStatus('Parsing CSV manually...');
           const fileText = await file.text();
           const lines = fileText.split(/\r?\n/).filter(line => line.trim());
           
@@ -158,10 +298,10 @@ function App() {
             throw new Error('Could not parse CSV headers');
           }
           
-          const createSQL = `CREATE OR REPLACE TABLE data_source (${headers.map((h: string) => `"${h.replace(/"/g, '""')}" VARCHAR`).join(', ')})`;
+          const createSQL = `CREATE OR REPLACE TABLE ${tableName} (${headers.map((h: string) => `"${h.replace(/"/g, '""')}" VARCHAR`).join(', ')})`;
           await conn.query(createSQL);
           
-          const dataLines = lines.slice(1, 10001); // Limit to 10000 rows
+          const dataLines = lines.slice(1, 10001);
           const insertBatch: string[] = [];
           
           for (const line of dataLines) {
@@ -172,63 +312,278 @@ function App() {
               insertBatch.push(`(${escapedValues.join(', ')})`);
               
               if (insertBatch.length >= 100) {
-                await conn.query(`INSERT INTO data_source VALUES ${insertBatch.join(', ')}`);
+                await conn.query(`INSERT INTO ${tableName} VALUES ${insertBatch.join(', ')}`);
                 insertBatch.length = 0;
               }
             }
           }
           
           if (insertBatch.length > 0) {
-            await conn.query(`INSERT INTO data_source VALUES ${insertBatch.join(', ')}`);
+            await conn.query(`INSERT INTO ${tableName} VALUES ${insertBatch.join(', ')}`);
           }
           
           success = true;
         } catch (error3) {
           lastError = error3 instanceof Error ? error3 : new Error(String(error3));
-          console.error('All methods failed:', error3);
         }
       }
     }
 
-    if (success) {
-      try {
-        const schemaRes = await conn.query(`DESCRIBE data_source`);
-        setSchema(schemaRes.toArray().map(r => r.toJSON()));
+    if (!success) {
+      throw lastError || new Error('Failed to load CSV');
+    }
 
-        const result = await conn.query(`SELECT * FROM data_source LIMIT 10`);
-        setRows(result.toArray().map(r => r.toJSON()));
-        setStatus('Data loaded.');
-        setError(null);
+    // Get schema and data
+    const schemaRes = await conn.query(`DESCRIBE ${tableName}`);
+    const schema = schemaRes.toArray().map(r => r.toJSON());
+    const result = await conn.query(`SELECT * FROM ${tableName} LIMIT 1000`);
+    const rows = result.toArray().map(r => r.toJSON());
+
+    return { schema, rows };
+  };
+
+  const onDrop = async (acceptedFiles: File[]) => {
+    if (!db || !conn) return;
+    setError(null);
+
+    // Process all files
+    for (const file of acceptedFiles) {
+      try {
+    setStatus(`Loading ${file.name}...`);
+
+        // Generate table name from filename
+        const tableName = `table_${file.name.replace(/[^a-zA-Z0-9]/g, '_').replace(/\.[^.]*$/, '')}`;
+        const tableId = `table_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        
+        const { schema, rows } = await loadFileAsTable(file, tableName);
+        
+        // Create table data object
+        const newTable: TableData = {
+          id: tableId,
+          name: tableName,
+          fileName: file.name,
+          schema,
+          rows,
+          createdAt: new Date()
+        };
+        
+        // Add to tables list
+        setTables(prev => [...prev, newTable]);
+        
+        // Set as active if it's the first table
+        setActiveTableId(prev => prev || tableId);
+        
+        // Add LOAD stage
+        const loadStage: TransformationStage = {
+          id: `stage_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+          type: 'LOAD',
+          description: `Loaded table "${tableName}" from file "${file.name}"`,
+          timestamp: new Date(),
+          data: {
+            tableName,
+            fileName: file.name
+          }
+        };
+        setTransformationStages(prev => [...prev, loadStage]);
+        
+        setStatus(`Loaded ${file.name} (${rows.length} rows)`);
       } catch (error) {
-        console.error('Error fetching schema/data:', error);
-        setError(`Data loaded but error fetching details: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        console.error(`Error loading ${file.name}:`, error);
+        setError(`Failed to load ${file.name}: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
-    } else {
-      const errorMessage = lastError?.message || 'Failed to load CSV';
+    }
+    
+    if (acceptedFiles.length > 0) {
+      setStatus(`Loaded ${acceptedFiles.length} file(s).`);
+    }
+  };
+
+  const handleTableSelect = (tableId: string) => {
+    setActiveTableId(tableId);
+  };
+
+  const handleTableClose = (tableId: string) => {
+    setTables(prev => {
+      const newTables = prev.filter(t => t.id !== tableId);
+      if (activeTableId === tableId && newTables.length > 0) {
+        setActiveTableId(newTables[0].id);
+      } else if (newTables.length === 0) {
+        setActiveTableId(null);
+      }
+      return newTables;
+    });
+  };
+
+  const executeStageTransformation = async (stage: TransformationStage) => {
+    if (!conn) {
+      throw new Error('Database connection not available');
+    }
+
+    // For some operations, we need at least one table
+    if (tables.length === 0 && stage.type !== 'LOAD') {
+      throw new Error('No tables available. Please upload a CSV file first.');
+    }
+
+    setIsProcessing(true);
+    setStatus(`Executing: ${stage.description}`);
+    setError(null);
+
+    try {
+      // Use activeTable as default source, or first table if no active table
+      const defaultTableName = activeTable?.name || (tables.length > 0 ? tables[0].name : '');
+      
+      // Generate SQL from the stage
+      const sql = generateSQLFromStage(stage, defaultTableName);
+      
+      // Execute the transformation and create result table
+      const resultTableName = `result_${Date.now()}`;
+      await conn.query(`CREATE OR REPLACE TABLE ${resultTableName} AS ${sql}`);
+      
+      // Get the result data
+      const result = await conn.query(`SELECT * FROM ${resultTableName} LIMIT 1000`);
+      const resultRows = result.toArray().map(r => r.toJSON());
+      const schemaRes = await conn.query(`DESCRIBE ${resultTableName}`);
+      const resultSchema = schemaRes.toArray().map(r => r.toJSON());
+
+      // Create new table for result
+      const resultTableId = `table_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const newTable: TableData = {
+        id: resultTableId,
+        name: resultTableName,
+        fileName: `Result of: ${stage.description}`,
+        schema: resultSchema,
+        rows: resultRows,
+        createdAt: new Date()
+      };
+
+      setTables(prev => [...prev, newTable]);
+      setActiveTableId(resultTableId);
+      setStatus(`Done! Created result table with ${resultRows.length} rows.`);
+      setError(null);
+    } catch (err) {
+      console.error(err);
+      const errorMessage = err instanceof Error ? err.message : 'Error executing transformation.';
+      setError(errorMessage);
       setStatus(`Error: ${errorMessage}`);
-      setError(`Failed to load CSV: ${errorMessage}. Please ensure the file is a valid CSV.`);
+      throw err; // Re-throw to prevent stage from being saved
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleStageEdit = async (stage: TransformationStage | null) => {
+    if (stage === null) {
+      // Cancel editing
+      setEditingStageId(null);
+      setNewStage(null);
+      return;
+    }
+
+    // Validate stage before saving
+    if (!validateStage(stage)) {
+      setError('Please fill in all required fields for this transformation stage.');
+      return;
+    }
+
+    setError(null);
+
+    try {
+      // Skip execution for LOAD stages (they're already loaded)
+      if (stage.type !== 'LOAD') {
+        // Execute the transformation directly
+        await executeStageTransformation(stage);
+      }
+
+      // After successful execution (or for LOAD stages), update the stages list
+      setEditingStageId(null);
+      setNewStage(null);
+
+      // Check if this is an edit or a new stage
+      const existingStageIndex = transformationStages.findIndex(s => s.id === stage.id);
+      
+      if (existingStageIndex >= 0) {
+        // Update existing stage
+        setTransformationStages(prev => {
+          const updated = [...prev];
+          updated[existingStageIndex] = stage;
+          return updated;
+        });
+      } else {
+        // New stage - add it
+        setTransformationStages(prev => [...prev, stage]);
+      }
+    } catch (err) {
+      // Error already set in executeStageTransformation
+      // Don't update stages if transformation failed
+      console.error('Failed to execute stage transformation:', err);
+      // Error message is already set in executeStageTransformation
+    }
+  };
+
+  const handleStageDelete = (stageId: string) => {
+    setTransformationStages(prev => prev.filter(s => s.id !== stageId));
+    setEditingStageId(null);
+    // Regenerate prompt
+    const updatedStages = transformationStages.filter(s => s.id !== stageId);
+    const prompt = generatePromptFromStages(updatedStages);
+    setChatPrompt(prompt);
+  };
+
+  const handleStageAdd = () => {
+    // Don't close existing editable card, just ignore the click
+    if (newStage || editingStageId) {
+      return;
+    }
+    // Start adding new stage
+    setNewStage({
+      id: `new_${Date.now()}`,
+      type: 'FILTER',
+      description: '',
+      timestamp: new Date(),
+      data: {}
+    });
+    setEditingStageId(null);
+  };
+
+  const handleStageStartEdit = (stageId: string) => {
+    if (stageId === '') {
+      // Cancel editing
+      setEditingStageId(null);
+    } else {
+      setEditingStageId(stageId);
+      setNewStage(null);
     }
   };
 
   const handleTransform = async (userPrompt: string) => {
-    if (!conn) return;
+    if (!conn || !activeTable) return;
     
-    if (!apiKey) {
-      setError('API key is required. Please set your Gemini API key in the top right corner.');
-      setStatus('Error: API key not set.');
-      return;
-    }
+    // API key can come from UI input, localStorage, or server .env
+    // We'll let the server handle the fallback
 
     setIsProcessing(true);
     setStatus('Gemini is thinking...');
     setError(null);
+    setChatPrompt(''); // Clear prompt after sending
 
     try {
+      // Get all table schemas for context
+      const allSchemas = tables.map(t => ({
+        tableName: t.name,
+        schema: t.schema
+      }));
+
       // 1. Ask Gemini for the SQL
+      // Send apiKey only if it's set (not null), server will use .env fallback
       const response = await fetch('/api/transform', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ schema, userPrompt, apiKey })
+        body: JSON.stringify({ 
+          schema: activeTable.schema,
+          allSchemas,
+          userPrompt, 
+          ...(apiKey && { apiKey }) // Only include apiKey if it's not null/empty
+        })
       });
       
       if (!response.ok) {
@@ -236,25 +591,89 @@ function App() {
         throw new Error(errorData.error || 'Failed to transform data');
       }
       
-      const { sql, chartType, xAxis, yAxis, zAxis, explanation } = await response.json();
+      const { sql, chartType, xAxis, yAxis, zAxis, explanation, transformationStages: stagesFromGemini } = await response.json();
       
-      // 2. Execute Gemini's SQL
+      // 2. Execute Gemini's SQL and create result table
       setStatus(`Executing: ${explanation}`);
-      const result = await conn.query(sql);
+      const resultTableName = `result_${Date.now()}`;
+      await conn.query(`CREATE OR REPLACE TABLE ${resultTableName} AS ${sql}`);
+      
+      const result = await conn.query(`SELECT * FROM ${resultTableName} LIMIT 1000`);
       const resultRows = result.toArray().map(r => r.toJSON());
+      const schemaRes = await conn.query(`DESCRIBE ${resultTableName}`);
+      const resultSchema = schemaRes.toArray().map(r => r.toJSON());
 
-      // 3. Update UI
-      setRows(resultRows);
+      // 3. Create new table for result
+      const resultTableId = `table_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const newTable: TableData = {
+        id: resultTableId,
+        name: resultTableName,
+        fileName: `Result of: ${userPrompt}`,
+        schema: resultSchema,
+        rows: resultRows,
+        createdAt: new Date()
+      };
+
+      setTables(prev => [...prev, newTable]);
+      setActiveTableId(resultTableId);
       setChartConfig({ type: chartType, xAxis, yAxis, zAxis });
-      setStatus(`Done! showed ${resultRows.length} rows.`);
+      setStatus(`Done! Created result table with ${resultRows.length} rows.`);
       setError(null);
+
+      // 4. Add transformation stages from Gemini response
+      let stagesToAdd: TransformationStage[] = [];
+      
+      if (stagesFromGemini && Array.isArray(stagesFromGemini) && stagesFromGemini.length > 0) {
+        // Use stages from Gemini
+        const baseTime = Date.now();
+        stagesToAdd = stagesFromGemini.map((stage: any, index: number) => {
+          // Validate and ensure type is set correctly
+          const validTypes = ['LOAD', 'JOIN', 'UNION', 'FILTER', 'GROUP', 'SELECT', 'SORT', 'AGGREGATE', 'CUSTOM'];
+          const stageType = (stage.type && validTypes.includes(stage.type.toUpperCase())) 
+            ? stage.type.toUpperCase() as TransformationStage['type']
+            : 'CUSTOM';
+          
+          // Ensure data is properly structured
+          let stageData = stage.data || {};
+          if (stageType === 'CUSTOM' && !stageData.sql) {
+            stageData = { sql };
+          }
+          
+          return {
+            id: `stage_${baseTime}_${index}_${Math.random().toString(36).substr(2, 9)}`,
+            type: stageType,
+            description: stage.description || explanation,
+            timestamp: new Date(),
+            data: stageData
+          };
+        });
+        
+        console.log('✅ Parsed stages from Gemini:', stagesToAdd);
+      } else {
+        // Fallback: parse SQL to extract stages
+        console.warn('⚠️  No stages returned from Gemini, parsing SQL as fallback');
+        const parsedStages = parseSQLToStages(sql, explanation);
+        const baseTime = Date.now();
+        stagesToAdd = parsedStages.map((stage, index) => ({
+          id: `stage_${baseTime}_${index}_${Math.random().toString(36).substr(2, 9)}`,
+          type: stage.type,
+          description: stage.description,
+          timestamp: new Date(),
+          data: stage.data || (stage.type === 'CUSTOM' ? { sql } : {})
+        }));
+        
+        console.log('✅ Parsed stages from SQL:', stagesToAdd);
+      }
+      
+      if (stagesToAdd.length > 0) {
+        setTransformationStages(prev => [...prev, ...stagesToAdd]);
+      }
 
     } catch (err) {
       console.error(err);
       const errorMessage = err instanceof Error ? err.message : 'Error transforming data.';
       setError(errorMessage);
       setStatus(`Error: ${errorMessage}`);
-      // Don't clear rows - stay on table view as requested
     } finally {
       setIsProcessing(false);
     }
@@ -296,124 +715,238 @@ function App() {
     }
   };
 
-  const { getRootProps, getInputProps } = useDropzone({ onDrop });
+  const { getRootProps, getInputProps } = useDropzone({ 
+    onDrop,
+    multiple: true, // Allow multiple file uploads
+    accept: {
+      'text/csv': ['.csv'],
+      'text/plain': ['.csv', '.txt']
+    }
+  });
 
   return (
-    <div style={{ maxWidth: '1000px', margin: '0 auto', padding: '20px', fontFamily: 'Inter, sans-serif', position: 'relative' }}>
-      {/* Header with API Key Input */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '20px', position: 'relative' }}>
-        <h1 style={{ margin: 0 }}>Gemini 3 Data Agent</h1>
-        <ApiKeyInput onApiKeySet={handleApiKeySet} currentApiKey={apiKey} />
-      </div>
-      
-      {/* Error Message */}
-      {error && (
-        <div style={{
-          padding: '12px',
-          background: '#fee2e2',
-          border: '1px solid #fecaca',
-          borderRadius: '4px',
-          color: '#991b1b',
-          marginBottom: '20px'
-        }}>
-          <strong>Error:</strong> {error}
-        </div>
-      )}
-      
-      {/* 1. Upload Section */}
-      {!rows.length && (
-        <>
-          <div {...getRootProps()} style={{ border: '2px dashed #ccc', padding: '40px', textAlign: 'center', cursor: 'pointer', borderRadius: '8px', position: 'relative', zIndex: 1, marginBottom: '20px' }}>
-            <input {...getInputProps()} />
-            <p>Drag & drop your CSV here to begin</p>
-            <p style={{ fontSize: '14px', color: '#666', marginTop: '10px' }}>Or try the visualization presets below with sample data</p>
+    <div style={{ 
+      display: 'flex', 
+      flexDirection: 'column',
+      minHeight: '100vh',
+      fontFamily: 'Inter, sans-serif',
+      background: themeConfig.colors.background
+    }}>
+      {/* Menu/Status Bar */}
+        <MenuBar
+          apiKey={apiKey}
+          onApiKeySet={handleApiKeySet}
+          status={status}
+          tablesCount={tables.length}
+          stagesCount={transformationStages.length}
+          hasDefaultApiKey={hasDefaultApiKey}
+          showVisualizationPresets={showVisualizationPresets}
+          onToggleVisualizationPresets={(value) => {
+            setShowVisualizationPresets(value);
+            localStorage.setItem('show_visualization_presets', String(value));
+          }}
+        />
+
+      {/* Main Content Layout */}
+      <div style={{ 
+        width: '100%',
+        padding: '10px', 
+        flex: 1,
+        height: 'calc(100vh - 80px)',
+        boxSizing: 'border-box'
+      }}>
+        <ResizablePanel
+          defaultLeftWidth={450}
+          minLeftWidth={300}
+          minRightWidth={400}
+          storageKey="transformation_panel_width"
+          leftPanel={
+            <div style={{
+              position: 'sticky',
+              top: '0',
+              height: 'fit-content',
+              maxHeight: 'calc(100vh - 100px)',
+              overflowY: 'auto',
+              paddingRight: '10px'
+            }}>
+              <StageGraphFlow
+                stages={transformationStages}
+                tables={tables.map(t => ({ id: t.id, name: t.name }))}
+                onStageEdit={handleStageEdit}
+                onStageStartEdit={handleStageStartEdit}
+                onStageDelete={handleStageDelete}
+                onStageAdd={handleStageAdd}
+                editingStageId={editingStageId}
+                newStage={newStage}
+              />
+            </div>
+          }
+          rightPanel={
+            <div style={{ flex: 1, minWidth: 0, overflowY: 'auto', paddingLeft: '10px' }}>
+          {/* Error Message */}
+          {error && (
+            <div style={{
+              padding: '12px',
+              background: themeConfig.colors.error + '20',
+              border: `1px solid ${themeConfig.colors.error}`,
+              borderRadius: '8px',
+              color: themeConfig.colors.error,
+              marginBottom: '20px'
+            }}>
+              <strong>Error:</strong> {error}
+            </div>
+          )}
+
+          {/* File Upload Section - Always visible */}
+          <div style={{ marginBottom: '20px' }}>
+            <div {...getRootProps()} style={{ 
+              border: `2px dashed ${themeConfig.colors.border}`, 
+              padding: '30px', 
+              textAlign: 'center', 
+              cursor: 'pointer', 
+              borderRadius: '8px', 
+              position: 'relative', 
+              zIndex: 1,
+              background: tables.length > 0 ? themeConfig.colors.surface : themeConfig.colors.surfaceElevated,
+              transition: 'all 0.2s',
+              borderColor: themeConfig.colors.border
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.borderColor = themeConfig.colors.primary;
+              e.currentTarget.style.background = themeConfig.colors.surface;
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.borderColor = themeConfig.colors.border;
+              e.currentTarget.style.background = tables.length > 0 ? themeConfig.colors.surface : themeConfig.colors.surfaceElevated;
+            }}
+            >
+          <input {...getInputProps()} />
+              <p style={{ margin: 0, fontSize: '16px', fontWeight: '500', color: themeConfig.colors.text }}>
+                {tables.length > 0 ? 'Upload More CSV Files' : 'Drag & drop your CSV file(s) here to begin'}
+              </p>
+              <p style={{ fontSize: '14px', color: themeConfig.colors.textSecondary, marginTop: '8px', marginBottom: 0 }}>
+                {tables.length > 0 
+                  ? 'Add additional tables for joins, unions, or other operations' 
+                  : 'You can upload multiple CSV files. Each will be loaded as a separate table.'}
+              </p>
+              {tables.length > 0 && (
+                <p style={{ fontSize: '12px', color: themeConfig.colors.textTertiary, marginTop: '4px', marginBottom: 0 }}>
+                  Currently loaded: {tables.length} table(s)
+                </p>
+              )}
+            </div>
           </div>
 
-          {/* Show presets with mock data */}
-          <div style={{ marginTop: '30px' }}>
-            <h2 style={{ fontSize: '20px', marginBottom: '15px', color: '#333' }}>Try Visualization Presets (Sample Data)</h2>
-            <p style={{ fontSize: '14px', color: '#666', marginBottom: '20px' }}>
-              Explore different visualization types with our sample sales data. Upload your own CSV to use your data.
-            </p>
-            <VisualizationPresets 
-              schema={mockSchema}
-              data={mockData}
-              onVisualize={handlePresetVisualize}
-            />
+          {/* Homepage Content - Only show when no tables */}
+          {tables.length === 0 && (
+            <div style={{ marginTop: '20px' }}>
+              {/* Chat Field on Homepage */}
+              <div style={{ marginBottom: '30px' }}>
+                <SmartTransform 
+                  schema={mockSchema} 
+                  onTransform={handleTransform} 
+                  isProcessing={isProcessing}
+                  externalPrompt={chatPrompt}
+                  onPromptChange={setChatPrompt}
+                />
+              </div>
+
+              <h2 style={{ fontSize: '20px', marginBottom: '15px', color: themeConfig.colors.text }}>Try Visualization Presets (Sample Data)</h2>
+              <p style={{ fontSize: '14px', color: themeConfig.colors.textSecondary, marginBottom: '20px' }}>
+                Explore different visualization types with our sample sales data. Upload your own CSV to use your data.
+              </p>
+            {showVisualizationPresets && (
+              <VisualizationPresets 
+                schema={mockSchema}
+                data={mockData}
+                onVisualize={handlePresetVisualize}
+              />
+            )}
             
             {/* Show sample data table */}
             {chartConfig && (
               <>
-                <div style={{ color: '#666', fontSize: '14px', marginTop: '20px', marginBottom: '10px' }}>
+                <div style={{ color: themeConfig.colors.textSecondary, fontSize: '14px', marginTop: '20px', marginBottom: '10px' }}>
                   Status: <strong>Showing sample data visualization</strong>
                 </div>
                 {/* Show standard Recharts for basic chart types */}
                 {chartConfig && !chartConfig.type?.startsWith('d3-') && !chartConfig.type?.startsWith('3d-') && (
-                  <ErrorBoundary fallback={<div style={{ padding: '20px', background: '#fee2e2', borderRadius: '8px', color: '#991b1b' }}>Error rendering chart. Please check your axis selections.</div>}>
+                  <ErrorBoundary fallback={<div style={{ padding: '20px', background: themeConfig.colors.error + '20', borderRadius: '8px', color: themeConfig.colors.error }}>Error rendering chart. Please check your axis selections.</div>}>
                     <DynamicChart data={mockData} config={chartConfig} />
                   </ErrorBoundary>
                 )}
                 {/* Show enhanced visualizations for D3.js and 3D charts */}
                 {chartConfig && (chartConfig.type?.startsWith('d3-') || chartConfig.type?.startsWith('3d-')) && (
-                  <ErrorBoundary fallback={<div style={{ padding: '20px', background: '#fee2e2', borderRadius: '8px', color: '#991b1b' }}>Error rendering visualization. Please check your axis selections.</div>}>
+                  <ErrorBoundary fallback={<div style={{ padding: '20px', background: themeConfig.colors.error + '20', borderRadius: '8px', color: themeConfig.colors.error }}>Error rendering visualization. Please check your axis selections.</div>}>
                     <EnhancedVisualizations data={mockData} config={chartConfig} />
                   </ErrorBoundary>
                 )}
               </>
             )}
-          </div>
-        </>
+        </div>
       )}
 
       {/* 2. Transformation Section */}
-      {rows.length > 0 && (
-        <>
+        {tables.length > 0 && (
+          <>
+          {/* Table Tabs */}
+          <TableTabs 
+            tables={tables}
+            activeTableId={activeTableId}
+            onTableSelect={handleTableSelect}
+            onTableClose={handleTableClose}
+          />
+
           <SmartTransform 
             schema={schema} 
             onTransform={handleTransform} 
             isProcessing={isProcessing} 
-          />
-
-          {/* Visualization Presets */}
-          <VisualizationPresets 
-            schema={schema}
-            data={rows}
-            onVisualize={handlePresetVisualize}
+            externalPrompt={chatPrompt}
+            onPromptChange={setChatPrompt}
           />
           
-          <div style={{ color: '#666', fontSize: '14px', marginBottom: '10px' }}>
+          {/* Visualization Presets */}
+          {showVisualizationPresets && (
+            <VisualizationPresets 
+              schema={schema}
+              data={rows}
+              onVisualize={handlePresetVisualize}
+            />
+          )}
+          
+          <div style={{ color: themeConfig.colors.textSecondary, fontSize: '14px', marginBottom: '10px' }}>
             Status: <strong>{status}</strong>
           </div>
 
           {/* 3. Visuals */}
           {/* Show standard Recharts for basic chart types */}
           {chartConfig && !chartConfig.type?.startsWith('d3-') && !chartConfig.type?.startsWith('3d-') && (
-            <ErrorBoundary fallback={<div style={{ padding: '20px', background: '#fee2e2', borderRadius: '8px', color: '#991b1b' }}>Error rendering chart. Please check your axis selections.</div>}>
-              <DynamicChart data={rows} config={chartConfig} />
+            <ErrorBoundary fallback={<div style={{ padding: '20px', background: themeConfig.colors.error + '20', borderRadius: '8px', color: themeConfig.colors.error }}>Error rendering chart. Please check your axis selections.</div>}>
+          <DynamicChart data={rows} config={chartConfig} />
             </ErrorBoundary>
           )}
           {/* Show enhanced visualizations for D3.js and 3D charts */}
           {chartConfig && (chartConfig.type?.startsWith('d3-') || chartConfig.type?.startsWith('3d-')) && (
-            <ErrorBoundary fallback={<div style={{ padding: '20px', background: '#fee2e2', borderRadius: '8px', color: '#991b1b' }}>Error rendering visualization. Please check your axis selections.</div>}>
+            <ErrorBoundary fallback={<div style={{ padding: '20px', background: themeConfig.colors.error + '20', borderRadius: '8px', color: themeConfig.colors.error }}>Error rendering visualization. Please check your axis selections.</div>}>
               <EnhancedVisualizations data={rows} config={chartConfig} />
             </ErrorBoundary>
           )}
 
           {/* 4. Data Grid */}
-          <div style={{ overflowX: 'auto', marginTop: '20px', border: '1px solid #eee' }}>
+          <div style={{ overflowX: 'auto', marginTop: '20px', border: `1px solid ${themeConfig.colors.border}`, borderRadius: '8px', overflow: 'hidden' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px' }}>
-              <thead style={{ background: '#f8f9fa' }}>
+              <thead style={{ background: themeConfig.colors.surface }}>
                 <tr>
                   {rows.length > 0 && Object.keys(rows[0]).map(key => (
-                    <th key={key} style={{ padding: '10px', textAlign: 'left', borderBottom: '2px solid #ddd' }}>{key}</th>
+                    <th key={key} style={{ padding: '10px', textAlign: 'left', borderBottom: `2px solid ${themeConfig.colors.border}`, color: themeConfig.colors.text }}>{key}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {rows.map((row, i) => (
-                  <tr key={i} style={{ borderBottom: '1px solid #eee' }}>
+                  <tr key={i} style={{ borderBottom: `1px solid ${themeConfig.colors.borderLight}`, background: i % 2 === 0 ? themeConfig.colors.background : themeConfig.colors.surface }}>
                     {Object.values(row).map((val: any, j) => (
-                      <td key={j} style={{ padding: '8px' }}>{val?.toString()}</td>
+                      <td key={j} style={{ padding: '8px', color: themeConfig.colors.text }}>{val?.toString()}</td>
                     ))}
                   </tr>
                 ))}
@@ -422,6 +955,10 @@ function App() {
           </div>
         </>
       )}
+            </div>
+          }
+        />
+      </div>
     </div>
   );
 }
