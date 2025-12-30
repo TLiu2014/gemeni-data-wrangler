@@ -17,6 +17,16 @@ interface Props {
 
 export function DynamicChart({ data, config }: Props) {
   if (!config || config.type === 'none' || data.length === 0) return null;
+  
+  // Validate axes exist in data
+  if (!config.xAxis || !config.yAxis) {
+    return <div style={{ padding: '20px', background: '#fee2e2', borderRadius: '8px', color: '#991b1b', marginTop: '20px' }}>Missing axis configuration. Please select X and Y axes.</div>;
+  }
+
+  // Check if axes exist in first row
+  if (data.length > 0 && (!data[0].hasOwnProperty(config.xAxis) || !data[0].hasOwnProperty(config.yAxis))) {
+    return <div style={{ padding: '20px', background: '#fee2e2', borderRadius: '8px', color: '#991b1b', marginTop: '20px' }}>Selected axes not found in data. Please check your axis selections.</div>;
+  }
 
   const renderChart = () => {
     const commonChildren = (

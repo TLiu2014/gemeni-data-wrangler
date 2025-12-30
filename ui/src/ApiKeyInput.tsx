@@ -9,20 +9,17 @@ interface Props {
 export function ApiKeyInput({ onApiKeySet, currentApiKey }: Props) {
   const [apiKey, setApiKey] = useState(currentApiKey || '');
   const [isVisible, setIsVisible] = useState(false);
-  const [isValid, setIsValid] = useState(!!currentApiKey);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (apiKey.trim()) {
       onApiKeySet(apiKey.trim());
-      setIsValid(true);
       setIsVisible(false);
     }
   };
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setApiKey(e.target.value);
-    setIsValid(false);
   };
 
   if (!isVisible && currentApiKey) {

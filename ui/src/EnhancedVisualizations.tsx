@@ -17,9 +17,11 @@ export function EnhancedVisualizations({ data, config }: Props) {
 
   useEffect(() => {
     if (!config || !data.length || !d3Container.current) return;
+    if (!config.xAxis || !config.yAxis) return; // Validate axes exist
 
-    // Clear previous content
-    d3.select(d3Container.current).selectAll('*').remove();
+    try {
+      // Clear previous content
+      d3.select(d3Container.current).selectAll('*').remove();
 
     const width = 800;
     const height = 400;
@@ -108,22 +110,30 @@ export function EnhancedVisualizations({ data, config }: Props) {
         .attr('height', d => height - margin.bottom - yScale(typeof d[yAxis] === 'number' ? d[yAxis] : parseFloat(d[yAxis]) || 0))
         .attr('fill', '#8884d8');
     }
+    } catch (error) {
+      console.error('Error rendering D3 visualization:', error);
+    }
   }, [data, config, d3Container]);
 
   // 3D visualization using Plotly
   if (config?.type === '3d-scatter' && config.zAxis) {
-    const xValues = data.map(d => {
-      const val = d[config.xAxis];
-      return typeof val === 'number' ? val : parseFloat(val) || 0;
-    });
-    const yValues = data.map(d => {
-      const val = d[config.yAxis];
-      return typeof val === 'number' ? val : parseFloat(val) || 0;
-    });
-    const zValues = data.map(d => {
-      const val = d[config.zAxis!];
-      return typeof val === 'number' ? val : parseFloat(val) || 0;
-    });
+    try {
+      if (!config.xAxis || !config.yAxis || !config.zAxis) {
+        return <div style={{ padding: '20px', background: '#fee2e2', borderRadius: '8px', color: '#991b1b' }}>Missing axis configuration for 3D visualization</div>;
+      }
+
+      const xValues = data.map(d => {
+        const val = d[config.xAxis];
+        return typeof val === 'number' ? val : parseFloat(val) || 0;
+      });
+      const yValues = data.map(d => {
+        const val = d[config.yAxis];
+        return typeof val === 'number' ? val : parseFloat(val) || 0;
+      });
+      const zValues = data.map(d => {
+        const val = d[config.zAxis!];
+        return typeof val === 'number' ? val : parseFloat(val) || 0;
+      });
 
     return (
       <div style={{ height: '500px', width: '100%', marginTop: '20px', padding: '20px', background: 'white', border: '1px solid #eee', borderRadius: '8px' }}>
@@ -160,10 +170,18 @@ export function EnhancedVisualizations({ data, config }: Props) {
         />
       </div>
     );
+    } catch (error) {
+      console.error('Error rendering 3D scatter:', error);
+      return <div style={{ padding: '20px', background: '#fee2e2', borderRadius: '8px', color: '#991b1b' }}>Error rendering 3D scatter plot. Please check your data and axis selections.</div>;
+    }
   }
 
   // 3D Surface plot
   if (config?.type === '3d-surface' && config.zAxis) {
+    try {
+      if (!config.xAxis || !config.yAxis || !config.zAxis) {
+        return <div style={{ padding: '20px', background: '#fee2e2', borderRadius: '8px', color: '#991b1b' }}>Missing axis configuration for 3D visualization</div>;
+      }
     // Create a grid for surface plot (simplified - would need proper grid data)
     const xValues = data.map(d => {
       const val = d[config.xAxis];
@@ -213,10 +231,17 @@ export function EnhancedVisualizations({ data, config }: Props) {
         />
       </div>
     );
+    } catch (error) {
+      console.error('Error rendering 3D surface:', error);
+      return <div style={{ padding: '20px', background: '#fee2e2', borderRadius: '8px', color: '#991b1b' }}>Error rendering 3D surface plot. Please check your data and axis selections.</div>;
+    }
   }
 
   // D3.js 2D visualizations
   if (config?.type?.startsWith('d3-')) {
+    if (!config.xAxis || !config.yAxis) {
+      return <div style={{ padding: '20px', background: '#fee2e2', borderRadius: '8px', color: '#991b1b' }}>Missing axis configuration for D3 visualization</div>;
+    }
     return (
       <div style={{ height: '400px', width: '100%', marginTop: '20px', padding: '20px', background: 'white', border: '1px solid #eee', borderRadius: '8px' }}>
         <h4 style={{ textAlign: 'center', margin: '0 0 10px 0' }}>
