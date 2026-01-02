@@ -18,6 +18,7 @@ import { useDropzone } from 'react-dropzone';
 import * as duckdb from '@duckdb/duckdb-wasm';
 import { mockData, mockSchema } from './mockData';
 import type { TableData, TransformationStage } from './types';
+import { FlowUploadModal } from './FlowUploadModal';
 import sampleStagesData from './sampleStages.json';
 import html2canvas from 'html2canvas';
 
@@ -85,6 +86,15 @@ function App() {
   const [stageToTableMap, setStageToTableMap] = useState<Map<string, string>>(new Map());
   // Export preview state
   const [exportPreview, setExportPreview] = useState<{ type: 'json' | 'image'; data: string | null } | null>(null);
+  // Explanation from Gemini for image analysis
+  const [imageExplanation, setImageExplanation] = useState<string>('');
+  // Flow upload modal state
+  const [showFlowUploadModal, setShowFlowUploadModal] = useState(false);
+  const [pendingFlowData, setPendingFlowData] = useState<{
+    tables: any[];
+    stages: any[];
+    explanation: string;
+  } | null>(null);
 
   // Get current active table data
   const activeTable = tables.find(t => t.id === activeTableId);
@@ -512,8 +522,33 @@ function App() {
     setError(null);
 
     try {
-      // Use activeTable as default source, or first table if no active table
-      const defaultTableName = activeTable?.name || (tables.length > 0 ? tables[0].name : '');
+      // Determine the input table for this stage
+      // Priority: 1) stage.data.table, 2) previous stage's result table, 3) activeTable, 4) first table
+      let defaultTableName = '';
+      
+      // For stages that specify a table in their data, use that
+      if (stage.data?.table) {
+        defaultTableName = stage.data.table;
+      } else {
+        // For stages in a pipeline, try to find the previous stage's result table
+        const stageIndex = transformationStages.findIndex(s => s.id === stage.id);
+        if (stageIndex > 0) {
+          // Find the previous stage's result table
+          const previousStage = transformationStages[stageIndex - 1];
+          const previousTableId = stageToTableMap.get(previousStage.id);
+          if (previousTableId) {
+            const previousTable = tables.find(t => t.id === previousTableId);
+            if (previousTable) {
+              defaultTableName = previousTable.name;
+            }
+          }
+        }
+        
+        // Fallback to activeTable or first table
+        if (!defaultTableName) {
+          defaultTableName = activeTable?.name || (tables.length > 0 ? tables[0].name : '');
+        }
+      }
 
       // Generate SQL from the stage
       const sql = generateSQLFromStage(stage, defaultTableName);
@@ -641,6 +676,225 @@ function App() {
     const updatedStages = transformationStages.filter(s => s.id !== stageId);
     const prompt = generatePromptFromStages(updatedStages);
     setChatPrompt(prompt);
+  };
+
+  const handleClearFlow = () => {
+    if (window.confirm('Are you sure you want to clear all transformation stages? This will remove all stages from the flow.')) {
+      setTransformationStages([]);
+      setEditingStageId(null);
+      setNewStage(null);
+      setStageToTableMap(new Map());
+      setChatPrompt('');
+      setStatus('Flow cleared. Ready for new transformations.');
+    }
+  };
+
+  // Helper function to process flow data (tables and stages)
+  const processFlowData = async (
+    tablesFromGemini: any[],
+    stagesFromGemini: any[],
+    shouldClearExisting: boolean = false,
+    horizontalOffset: number = 0
+  ) => {
+    if (!db || !conn) return;
+
+    setStatus('Creating tables...');
+
+    // Clear existing flow if needed
+    if (shouldClearExisting) {
+      setTransformationStages([]);
+      setEditingStageId(null);
+      setNewStage(null);
+      setStageToTableMap(new Map());
+      setChatPrompt('');
+    }
+
+    // Create tables in DuckDB and add to app state
+    const newTables: TableData[] = [];
+    for (const tableData of tablesFromGemini) {
+      const tableId = `table_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
+      // Create table in DuckDB
+      const columnsDef = tableData.columns.map((col: any) => 
+        `${col.name} ${col.type || 'VARCHAR'}`
+      ).join(', ');
+      
+      await conn.query(`CREATE OR REPLACE TABLE ${tableData.name} (${columnsDef})`);
+      
+      // Insert sample data
+      if (tableData.rows && tableData.rows.length > 0) {
+        const columns = tableData.columns.map((col: any) => col.name).join(', ');
+        for (const row of tableData.rows) {
+          const values = tableData.columns.map((col: any, colIndex: number) => {
+            let value;
+            if (Array.isArray(row)) {
+              value = row[colIndex];
+            } else {
+              value = row[col.name];
+            }
+            if (value === null || value === undefined) return 'NULL';
+            if (typeof value === 'string') return `'${value.replace(/'/g, "''")}'`;
+            return String(value);
+          }).join(', ');
+          await conn.query(`INSERT INTO ${tableData.name} (${columns}) VALUES (${values})`);
+        }
+      }
+
+      // Get all rows for display
+      const result = await conn.query(`SELECT * FROM ${tableData.name}`);
+      const rows = result.toArray().map(r => r.toJSON());
+      const schemaRes = await conn.query(`DESCRIBE ${tableData.name}`);
+      const schema = schemaRes.toArray().map(r => r.toJSON());
+
+      const newTable: TableData = {
+        id: tableId,
+        name: tableData.name,
+        fileName: `Generated from flow diagram`,
+        schema,
+        rows,
+        createdAt: new Date()
+      };
+
+      newTables.push(newTable);
+    }
+
+    // Add tables to app state
+    if (shouldClearExisting) {
+      setTables(newTables);
+    } else {
+      setTables(prev => [...prev, ...newTables]);
+    }
+    if (newTables.length > 0) {
+      setActiveTableId(newTables[newTables.length - 1].id);
+    }
+
+    // Process transformation stages
+    if (stagesFromGemini && Array.isArray(stagesFromGemini) && stagesFromGemini.length > 0) {
+      // Convert Gemini stages to TransformationStage format
+      const newStages: TransformationStage[] = stagesFromGemini.map((stage: any) => ({
+        id: stage.id || `stage_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        type: stage.type,
+        description: stage.description,
+        timestamp: new Date(),
+        data: {
+          ...stage.data,
+          ...(horizontalOffset > 0 && { flowGroupId: `flow_${Date.now()}`, horizontalOffset })
+        }
+      }));
+
+      // Add stages to app state
+      if (shouldClearExisting) {
+        setTransformationStages(newStages);
+      } else {
+        setTransformationStages(prev => [...prev, ...newStages]);
+      }
+
+      // Execute all stages to generate result tables
+      setStatus('Executing transformation stages...');
+      
+      const existingStagesCount = shouldClearExisting ? 0 : transformationStages.length;
+      for (let i = 0; i < newStages.length; i++) {
+        const stage = newStages[i];
+        if (stage.type === 'LOAD') continue;
+
+        try {
+          const stageIndex = existingStagesCount + i;
+          const defaultTableName = newTables.length > 0 ? newTables[0].name : (tables.length > 0 ? tables[0].name : '');
+          const sql = generateSQLFromStage(stage, defaultTableName);
+          
+          const stageTypeLower = stage.type.toLowerCase();
+          const resultTableName = `result_stage_${stageIndex}_${stageTypeLower}`;
+          await conn.query(`CREATE OR REPLACE TABLE ${resultTableName} AS ${sql}`);
+          
+          const result = await conn.query(`SELECT * FROM ${resultTableName} LIMIT 1000`);
+          const resultRows = result.toArray().map(r => r.toJSON());
+          const schemaRes = await conn.query(`DESCRIBE ${resultTableName}`);
+          const resultSchema = schemaRes.toArray().map(r => r.toJSON());
+          
+          const resultTableId = `table_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+          const resultTable: TableData = {
+            id: resultTableId,
+            name: resultTableName,
+            fileName: `Result of ${stage.description}`,
+            schema: resultSchema,
+            rows: resultRows,
+            createdAt: new Date()
+          };
+          
+          setTables(prev => [...prev, resultTable]);
+          setStageToTableMap(prev => {
+            const newMap = new Map(prev);
+            newMap.set(stage.id, resultTableId);
+            return newMap;
+          });
+          
+          if (i === newStages.length - 1) {
+            setActiveTableId(resultTableId);
+          }
+        } catch (err) {
+          console.warn(`Error executing stage ${stage.id}:`, err);
+          setError(`Warning: Failed to execute stage "${stage.description}": ${err instanceof Error ? err.message : 'Unknown error'}`);
+        }
+      }
+
+      setStatus(`Flow diagram analyzed! Created ${newTables.length} table(s) and ${newStages.length} stage(s).`);
+    } else {
+      setStatus(`Table analyzed! Created ${newTables.length} table(s).`);
+    }
+  };
+
+  // Handle replace flow (clear canvas then load)
+  const handleReplaceFlow = async () => {
+    if (!pendingFlowData) return;
+    
+    setIsProcessing(true);
+    setStatus('Replacing flow...');
+    setError(null);
+    
+    try {
+      await processFlowData(
+        pendingFlowData.tables,
+        pendingFlowData.stages,
+        true, // clear existing
+        0 // no horizontal offset
+      );
+      setError(null);
+    } catch (err) {
+      console.error('Error replacing flow:', err);
+      setError(`Failed to replace flow: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      setStatus('Error replacing flow');
+    } finally {
+      setIsProcessing(false);
+      setPendingFlowData(null);
+    }
+  };
+
+  // Handle add flow side-by-side
+  const handleAddFlowSideBySide = async () => {
+    if (!pendingFlowData) return;
+    
+    setIsProcessing(true);
+    setStatus('Adding flow side-by-side...');
+    setError(null);
+    
+    try {
+      // Calculate horizontal offset based on existing stages
+      const horizontalOffset = transformationStages.length > 0 ? 400 : 0;
+      await processFlowData(
+        pendingFlowData.tables,
+        pendingFlowData.stages,
+        false, // don't clear existing
+        horizontalOffset
+      );
+      setError(null);
+    } catch (err) {
+      console.error('Error adding flow:', err);
+      setError(`Failed to add flow: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      setStatus('Error adding flow');
+    } finally {
+      setIsProcessing(false);
+      setPendingFlowData(null);
+    }
   };
 
   const handleStageAdd = () => {
@@ -871,6 +1125,143 @@ function App() {
     }
   });
 
+  // Handle image upload for analysis
+  const handleImageUpload = async (imageFile: File) => {
+    if (!db || !conn) return;
+
+    setIsProcessing(true);
+    setStatus('Analyzing image with Gemini...');
+    setError(null);
+    setImageExplanation('');
+
+    try {
+      // Create FormData to send image
+      const formData = new FormData();
+      formData.append('image', imageFile);
+      if (apiKey) {
+        formData.append('apiKey', apiKey);
+      }
+
+      // Send to server for analysis
+      const response = await fetch('/api/analyze-flow-image', {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!response.ok) {
+        // Try to parse error as JSON, fallback to text
+        let errorMessage = 'Failed to analyze image';
+        try {
+          const errorData = await response.json();
+          errorMessage = errorData.error || errorData.details || errorMessage;
+        } catch (e) {
+          const errorText = await response.text();
+          if (errorText.includes('<!DOCTYPE')) {
+            errorMessage = `Server error: The server may not be running or the endpoint is not available. Please check if the server is running on port 3000.`;
+          } else {
+            errorMessage = errorText || errorMessage;
+          }
+        }
+        throw new Error(errorMessage);
+      }
+
+      // Parse response as JSON
+      let responseData;
+      try {
+        const responseText = await response.text();
+        responseData = JSON.parse(responseText);
+      } catch (e) {
+        throw new Error(`Invalid response from server: ${e instanceof Error ? e.message : 'Unknown error'}`);
+      }
+
+      const { imageType, explanation, tables: tablesFromGemini, transformationStages: stagesFromGemini } = responseData;
+
+      // Always set the explanation
+      setImageExplanation(explanation || 'No explanation provided.');
+
+      // Handle different image types
+      if (imageType === 'unrecognized') {
+        setStatus('Image analyzed - not a stage flow, data table, or schema.');
+        setError(null);
+        return;
+      }
+
+      // For stage_flow and data_table, process tables
+      if (imageType === 'stage_flow' || imageType === 'data_table') {
+        if (!tablesFromGemini || !Array.isArray(tablesFromGemini) || tablesFromGemini.length === 0) {
+          throw new Error('No tables found in the image');
+        }
+
+        // For stage_flow with existing stages, show modal or auto-execute based on settings
+        if (imageType === 'stage_flow' && stagesFromGemini && Array.isArray(stagesFromGemini) && stagesFromGemini.length > 0 && transformationStages.length > 0) {
+          // Check if "ask before load" is enabled
+          const askBeforeLoad = localStorage.getItem('flow_upload_ask_before') === 'true';
+          
+          // If "ask before load" is enabled, always show modal
+          if (askBeforeLoad) {
+            setPendingFlowData({
+              tables: tablesFromGemini,
+              stages: stagesFromGemini,
+              explanation: explanation || ''
+            });
+            setShowFlowUploadModal(true);
+            setStatus('Flow detected. Please choose an action.');
+            return;
+          }
+          
+          // Check if user has a saved preference
+          const savedPreference = localStorage.getItem('flow_upload_preference');
+          if (savedPreference) {
+            const preference = JSON.parse(savedPreference);
+            // Auto-execute based on preference
+            setPendingFlowData({
+              tables: tablesFromGemini,
+              stages: stagesFromGemini,
+              explanation: explanation || ''
+            });
+            if (preference.action === 'replace') {
+              await handleReplaceFlow();
+              return;
+            } else if (preference.action === 'add') {
+              await handleAddFlowSideBySide();
+              return;
+            }
+          }
+          
+          // No preference - show modal (default behavior)
+          setPendingFlowData({
+            tables: tablesFromGemini,
+            stages: stagesFromGemini,
+            explanation: explanation || ''
+          });
+          setShowFlowUploadModal(true);
+          setStatus('Flow detected. Please choose an action.');
+          return;
+        }
+
+        // For data_table or stage_flow with no existing stages, process directly
+        if (imageType === 'data_table') {
+          // Process data table directly
+          await processFlowData(tablesFromGemini, [], false, 0);
+        } else if (imageType === 'stage_flow') {
+          // Process stage flow directly (no existing stages)
+          await processFlowData(tablesFromGemini, stagesFromGemini || [], true, 0);
+        }
+      } else if (imageType === 'schema') {
+        setStatus('Schema image analyzed - see explanation below.');
+      }
+
+      setError(null);
+    } catch (err) {
+      console.error('Error analyzing image:', err);
+      setError(`Failed to analyze image: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      setStatus('Error analyzing image');
+      setImageExplanation(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
   // Export stage flow to JSON
   const exportStagesToJSON = () => {
     // Convert TransformationStage[] to sampleStages.json format (without timestamp)
@@ -1078,6 +1469,7 @@ function App() {
                 onShowTable={(tableId) => setActiveTableId(tableId)}
                 onExportJSON={exportStagesToJSON}
                 onExportImage={exportStagesToImage}
+                onClearFlow={handleClearFlow}
               />
             </div>
           }
@@ -1148,6 +1540,9 @@ function App() {
                   isProcessing={isProcessing}
                   externalPrompt={chatPrompt}
                   onPromptChange={setChatPrompt}
+                  onImageUpload={handleImageUpload}
+                  explanation={imageExplanation}
+                  status={status}
                 />
               </div>
 
@@ -1195,6 +1590,9 @@ function App() {
             isProcessing={isProcessing} 
             externalPrompt={chatPrompt}
             onPromptChange={setChatPrompt}
+            onImageUpload={handleImageUpload}
+            explanation={imageExplanation}
+            status={status}
           />
           
           {/* Visualization Presets */}
@@ -1260,6 +1658,19 @@ function App() {
         />
       </div>
       
+      {/* Flow Upload Modal */}
+      <FlowUploadModal
+        isOpen={showFlowUploadModal}
+        onClose={() => {
+          setShowFlowUploadModal(false);
+          setPendingFlowData(null);
+          setIsProcessing(false);
+        }}
+        onReplace={handleReplaceFlow}
+        onAddSideBySide={handleAddFlowSideBySide}
+        existingStagesCount={transformationStages.length}
+      />
+
       {/* Export Preview Modal */}
       {exportPreview && (
         <div style={{

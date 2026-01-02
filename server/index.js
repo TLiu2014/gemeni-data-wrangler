@@ -2,10 +2,25 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const multer = require('multer');
 const { GoogleGenerativeAI, SchemaType } = require('@google/generative-ai');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Configure multer for image uploads
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+  fileFilter: (req, file, cb) => {
+    // Accept image files
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed'), false);
+    }
+  }
+});
 
 // Middleware
 app.use(cors());
@@ -233,6 +248,247 @@ app.post('/api/transform', async (req, res) => {
     } catch (error) {
         console.error(error);
         res.status(500).json({ error: "Transformation failed", details: error.message });
+    }
+});
+
+// Schema for image analysis response - flexible to handle different image types
+const imageAnalysisResponseSchema = {
+    type: SchemaType.OBJECT,
+    properties: {
+        imageType: {
+            type: SchemaType.STRING,
+            description: "Type of image detected: 'stage_flow', 'data_table', 'schema', or 'unrecognized'"
+        },
+        explanation: {
+            type: SchemaType.STRING,
+            description: "Natural language explanation of what was found in the image. For stage flows, explain the flow and result table. For data tables, describe the table structure and content. For unrecognized images, explain why it cannot be processed."
+        },
+        tables: {
+            type: SchemaType.ARRAY,
+            items: {
+                type: SchemaType.OBJECT,
+                properties: {
+                    name: { type: SchemaType.STRING, description: "Table name" },
+                    columns: {
+                        type: SchemaType.ARRAY,
+                        items: {
+                            type: SchemaType.OBJECT,
+                            properties: {
+                                name: { type: SchemaType.STRING, description: "Column name" },
+                                type: { type: SchemaType.STRING, description: "Column data type (e.g., 'VARCHAR', 'INTEGER', 'DOUBLE')" }
+                            }
+                        },
+                        description: "Array of column definitions"
+                    },
+                    rows: {
+                        type: SchemaType.ARRAY,
+                        items: {
+                            type: SchemaType.ARRAY,
+                            items: {
+                                type: SchemaType.STRING,
+                                description: "Cell value as string"
+                            },
+                            description: "Array of cell values in the same order as the columns array"
+                        },
+                        description: "Array of sample data rows (provide at least 5-10 rows for each table). Each row is an array of values matching the order of columns in the columns array."
+                    }
+                },
+                required: ["name", "columns", "rows"]
+            },
+            description: "Array of tables with their schemas and sample data. Required for 'stage_flow' and 'data_table' types, empty array for others."
+        },
+        transformationStages: {
+            type: SchemaType.ARRAY,
+            items: {
+                type: SchemaType.OBJECT,
+                properties: {
+                    id: { type: SchemaType.STRING, description: "Unique stage identifier" },
+                    type: { 
+                        type: SchemaType.STRING, 
+                        description: "Stage type: 'LOAD', 'JOIN', 'UNION', 'FILTER', 'GROUP', 'SELECT', 'SORT', 'AGGREGATE', or 'CUSTOM'" 
+                    },
+                    description: { 
+                        type: SchemaType.STRING, 
+                        description: "Clear description of what this transformation stage does" 
+                    },
+                    data: {
+                        type: SchemaType.OBJECT,
+                        properties: {
+                            // For JOIN
+                            joinType: { type: SchemaType.STRING, description: "For JOIN: 'INNER', 'LEFT', 'RIGHT', or 'FULL OUTER'" },
+                            leftTable: { type: SchemaType.STRING, description: "For JOIN: left table name" },
+                            rightTable: { type: SchemaType.STRING, description: "For JOIN: right table name" },
+                            leftKey: { type: SchemaType.STRING, description: "For JOIN: left table join key column" },
+                            rightKey: { type: SchemaType.STRING, description: "For JOIN: right table join key column" },
+                            // For UNION
+                            unionType: { type: SchemaType.STRING, description: "For UNION: 'UNION' or 'UNION ALL'" },
+                            tables: { 
+                                type: SchemaType.ARRAY, 
+                                items: { type: SchemaType.STRING },
+                                description: "For UNION: array of table names to union" 
+                            },
+                            // For FILTER
+                            table: { type: SchemaType.STRING, description: "For FILTER: table name to filter" },
+                            column: { type: SchemaType.STRING, description: "For FILTER: column name" },
+                            operator: { type: SchemaType.STRING, description: "For FILTER: '=', '!=', '>', '<', '>=', '<=', 'LIKE', 'IN', 'NOT IN'" },
+                            value: { type: SchemaType.STRING, description: "For FILTER: filter value" },
+                            // For GROUP
+                            groupBy: { 
+                                type: SchemaType.ARRAY, 
+                                items: { type: SchemaType.STRING },
+                                description: "For GROUP: array of column names to group by" 
+                            },
+                            aggregations: {
+                                type: SchemaType.ARRAY,
+                                items: {
+                                    type: SchemaType.OBJECT,
+                                    properties: {
+                                        function: { type: SchemaType.STRING, description: "Aggregation function: 'SUM', 'COUNT', 'AVG', 'MAX', 'MIN', etc." },
+                                        column: { type: SchemaType.STRING, description: "Column to aggregate" },
+                                        alias: { type: SchemaType.STRING, description: "Optional alias for the aggregation" }
+                                    }
+                                },
+                                description: "For GROUP: array of aggregations"
+                            },
+                            // For SELECT
+                            columns: { 
+                                type: SchemaType.ARRAY, 
+                                items: { type: SchemaType.STRING },
+                                description: "For SELECT: array of column names to select" 
+                            },
+                            // For SORT
+                            orderBy: {
+                                type: SchemaType.ARRAY,
+                                items: {
+                                    type: SchemaType.OBJECT,
+                                    properties: {
+                                        column: { type: SchemaType.STRING },
+                                        direction: { type: SchemaType.STRING, description: "'ASC' or 'DESC'" }
+                                    }
+                                },
+                                description: "For SORT: array of sort specifications"
+                            },
+                            // For LOAD
+                            tableName: { type: SchemaType.STRING, description: "For LOAD: table name" },
+                            // For CUSTOM
+                            sql: { type: SchemaType.STRING, description: "For CUSTOM: the SQL query string" }
+                        }
+                    }
+                },
+                required: ["id", "type", "description"]
+            },
+            description: "Array of transformation stages representing the flow diagram. Required only for 'stage_flow' type, empty array for others."
+        }
+    },
+    required: ["imageType", "explanation"]
+};
+
+// Error handler for multer
+const handleMulterError = (err, req, res, next) => {
+    if (err instanceof multer.MulterError) {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+            return res.status(400).json({ error: "File too large. Maximum size is 10MB." });
+        }
+        return res.status(400).json({ error: `Upload error: ${err.message}` });
+    }
+    if (err) {
+        return res.status(400).json({ error: err.message || "File upload error" });
+    }
+    next();
+};
+
+app.post('/api/analyze-flow-image', upload.single('image'), handleMulterError, async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: "No image file provided" });
+        }
+
+        const { apiKey } = req.body;
+        
+        // Use API key from request body (if provided), fallback to environment variable
+        const apiKeyToUse = (apiKey && apiKey.trim()) || process.env.GEMINI_API_KEY;
+        
+        if (!apiKeyToUse) {
+            return res.status(400).json({ 
+                error: "API key is required. Please set it in Settings or set GEMINI_API_KEY environment variable in server/.env file." 
+            });
+        }
+        
+        // Create a new instance with the provided API key
+        const genAIInstance = new GoogleGenerativeAI(apiKeyToUse);
+        
+        // Use Gemini 3 with vision capabilities
+        const model = genAIInstance.getGenerativeModel({ 
+            model: "gemini-3-flash-preview",
+            generationConfig: {
+                responseMimeType: "application/json",
+                responseSchema: imageAnalysisResponseSchema
+            }
+        });
+        
+        // Convert image buffer to base64
+        const imageBase64 = req.file.buffer.toString('base64');
+        const mimeType = req.file.mimetype;
+        
+        const prompt = `
+You are analyzing an image that may contain one of the following:
+1. A data transformation flow diagram (showing stages like JOIN, FILTER, GROUP, etc. connected together)
+2. A data table (showing tabular data with rows and columns)
+3. A database schema (showing table structures and relationships)
+4. Something else (not a stage flow, data table, or schema)
+
+Your task:
+1. First, determine what type of image this is:
+   - If it's a flow diagram with transformation stages (like JOIN, FILTER, GROUP, etc.) connected together, set imageType to "stage_flow"
+   - If it's a data table showing rows and columns of data, set imageType to "data_table"
+   - If it's a database schema showing table structures, set imageType to "schema"
+   - If it's none of the above, set imageType to "unrecognized"
+
+2. Provide a natural language explanation in the "explanation" field:
+   - For stage_flow: Explain the flow, what transformations are happening, and describe the final result table
+   - For data_table: Describe the table structure, columns, and summarize the data content
+   - For schema: Describe the table structures, relationships, and key information
+   - For unrecognized: Explain that this is not a stage flow, data table, or schema, and cannot be processed
+
+3. Extract structured data ONLY if the image type is "stage_flow" or "data_table":
+   - For stage_flow:
+     * Extract all tables (input tables and result tables)
+     * For each table: name, columns (with types), and sample data rows (5-10 rows)
+     * Extract all transformation stages with their details (id, type, description, data)
+     * Maintain the order of stages as shown in the diagram
+   - For data_table:
+     * Extract the table: name, columns (with types), and sample data rows (5-10 rows)
+     * Do NOT include transformationStages (empty array)
+   - For schema or unrecognized:
+     * Set tables to empty array []
+     * Set transformationStages to empty array []
+
+Important:
+- Always provide a clear, natural language explanation
+- Only extract structured data (tables/stages) for stage_flow and data_table types
+- Generate realistic sample data (don't use placeholder values)
+- For stage_flow, ensure all stage IDs are unique and the flow is complete
+`;
+
+        // Prepare image part for Gemini
+        const imagePart = {
+            inlineData: {
+                data: imageBase64,
+                mimeType: mimeType
+            }
+        };
+
+        const result = await model.generateContent([prompt, imagePart]);
+        const response = result.response.text();
+        const parsedResponse = JSON.parse(response);
+        
+        // Log the response for debugging
+        console.log('Gemini image analysis response:', JSON.stringify(parsedResponse, null, 2));
+        
+        res.json(parsedResponse);
+    } catch (error) {
+        console.error('Error analyzing image:', error);
+        res.status(500).json({ error: "Image analysis failed", details: error.message });
     }
 });
 

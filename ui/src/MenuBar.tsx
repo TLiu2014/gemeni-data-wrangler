@@ -27,6 +27,49 @@ export function MenuBar({
   const { theme, themeConfig, toggleTheme } = useTheme();
   const [showSettings, setShowSettings] = useState(false);
   const settingsRef = useRef<HTMLDivElement>(null);
+  
+  // State for flow upload preferences
+  const [flowUploadAction, setFlowUploadAction] = useState<'replace' | 'add'>(() => {
+    const saved = localStorage.getItem('flow_upload_preference');
+    if (!saved) {
+      // Set default preference if not exists
+      localStorage.setItem('flow_upload_preference', JSON.stringify({ action: 'replace' }));
+      return 'replace'; // Default to replace
+    }
+    const pref = JSON.parse(saved);
+    return pref.action === 'add' ? 'add' : 'replace';
+  });
+  const [askBeforeLoad, setAskBeforeLoad] = useState(() => {
+    const saved = localStorage.getItem('flow_upload_ask_before');
+    if (saved === null) {
+      // Set default to true if not exists
+      localStorage.setItem('flow_upload_ask_before', 'true');
+      return true; // Default to ask before load
+    }
+    return saved === 'true';
+  });
+
+  // Listen for storage changes to update state
+  useEffect(() => {
+    const handleStorageChange = () => {
+      const saved = localStorage.getItem('flow_upload_preference');
+      if (saved) {
+        const pref = JSON.parse(saved);
+        setFlowUploadAction(pref.action === 'add' ? 'add' : 'replace');
+      } else {
+        setFlowUploadAction('replace');
+      }
+      setAskBeforeLoad(localStorage.getItem('flow_upload_ask_before') === 'true');
+    };
+
+    window.addEventListener('storage', handleStorageChange);
+    // Also listen for custom events (when localStorage is changed in same window)
+    window.addEventListener('storage', handleStorageChange);
+    
+    return () => {
+      window.removeEventListener('storage', handleStorageChange);
+    };
+  }, []);
 
   // Close settings when clicking outside
   useEffect(() => {
@@ -226,6 +269,110 @@ export function MenuBar({
               }}>
                 Toggle visibility of visualization preset buttons
               </p>
+            </div>
+
+            {/* Flow Upload Settings */}
+            <div style={{ 
+              marginTop: '16px', 
+              paddingTop: '16px', 
+              borderTop: `1px solid ${themeConfig.colors.border}` 
+            }}>
+              <div style={{ marginBottom: '12px' }}>
+                <label style={{
+                  fontSize: '14px',
+                  fontWeight: '500',
+                  color: themeConfig.colors.text,
+                  display: 'block',
+                  marginBottom: '8px'
+                }}>
+                  When uploading a flow image:
+                </label>
+                
+                <div style={{ marginBottom: '12px' }}>
+                  <label style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    cursor: 'pointer',
+                    fontSize: '13px',
+                    color: themeConfig.colors.text,
+                    marginBottom: '4px'
+                  }}>
+                    <input
+                      type="radio"
+                      name="flow-upload-action"
+                      value="replace"
+                      checked={flowUploadAction === 'replace'}
+                      onChange={() => {
+                        localStorage.setItem('flow_upload_preference', JSON.stringify({ action: 'replace' }));
+                        setFlowUploadAction('replace');
+                      }}
+                      style={{
+                        cursor: 'pointer',
+                        accentColor: themeConfig.colors.primary
+                      }}
+                    />
+                    <span>Replace current flow (default)</span>
+                  </label>
+                  <label style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    cursor: 'pointer',
+                    fontSize: '13px',
+                    color: themeConfig.colors.text
+                  }}>
+                    <input
+                      type="radio"
+                      name="flow-upload-action"
+                      value="add"
+                      checked={flowUploadAction === 'add'}
+                      onChange={() => {
+                        localStorage.setItem('flow_upload_preference', JSON.stringify({ action: 'add' }));
+                        setFlowUploadAction('add');
+                      }}
+                      style={{
+                        cursor: 'pointer',
+                        accentColor: themeConfig.colors.primary
+                      }}
+                    />
+                    <span>Add as new flow (side-by-side)</span>
+                  </label>
+                </div>
+
+                <label style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  cursor: 'pointer',
+                  fontSize: '13px',
+                  color: themeConfig.colors.text,
+                  marginTop: '8px'
+                }}>
+                  <span>Ask before loading new flow</span>
+                  <input
+                    type="checkbox"
+                    checked={askBeforeLoad}
+                    onChange={(e) => {
+                      localStorage.setItem('flow_upload_ask_before', String(e.target.checked));
+                      setAskBeforeLoad(e.target.checked);
+                    }}
+                    style={{
+                      width: '18px',
+                      height: '18px',
+                      cursor: 'pointer',
+                      accentColor: themeConfig.colors.primary
+                    }}
+                  />
+                </label>
+                <p style={{
+                  margin: '8px 0 0 0',
+                  fontSize: '12px',
+                  color: themeConfig.colors.textSecondary
+                }}>
+                  When enabled, always show confirmation modal even if preference is saved
+                </p>
+              </div>
             </div>
           </div>
         )}
