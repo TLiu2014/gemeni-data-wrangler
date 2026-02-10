@@ -7,6 +7,9 @@ ui/node_modules/
 .env
 server/.env
 
+# Server-stored encrypted data (e.g. API key)
+server/data/
+
 # Build outputs
 ui/dist/
 ui/build/

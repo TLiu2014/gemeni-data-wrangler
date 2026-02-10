@@ -4,6 +4,7 @@ const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
 const { GoogleGenerativeAI, SchemaType } = require('@google/generative-ai');
+const { saveEncryptedApiKey, getDecryptedApiKey } = require('./apiKeyStore');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -68,6 +69,15 @@ function validateApiKey(apiKey) {
   // Check for basic alphanumeric pattern (allowing dashes and underscores)
   if (!/^[A-Za-z0-9_-]+$/.test(trimmed)) return false;
   return true;
+}
+
+// Resolve API key: request body (if present) > encrypted file > env
+function getApiKeyForRequest(req) {
+  const fromBody = req.body && req.body.apiKey && typeof req.body.apiKey === 'string' ? req.body.apiKey.trim() : '';
+  if (fromBody) return fromBody;
+  const fromFile = getDecryptedApiKey();
+  if (fromFile) return fromFile;
+  return process.env.GEMINI_API_KEY || '';
 }
 
 // Define the response schema we want Gemini to strictly follow
@@ -187,17 +197,37 @@ const responseSchema = {
 app.get('/api/config', (req, res) => {
     // Return default API key if available (for UI to use)
     res.json({ 
-        hasDefaultApiKey: !!process.env.GEMINI_API_KEY,
+        hasDefaultApiKey: !!(process.env.GEMINI_API_KEY || getDecryptedApiKey()),
         // Don't send the actual key for security, just indicate if it exists
     });
 });
 
+// Save API key from Settings: encrypt and store in server/data/api-key.enc
+app.post('/api/settings/api-key', (req, res) => {
+    try {
+        const { apiKey } = req.body || {};
+        const trimmed = typeof apiKey === 'string' ? apiKey.trim() : '';
+        if (!trimmed) {
+            return res.status(400).json({ error: 'API key is required.' });
+        }
+        if (!validateApiKey(trimmed)) {
+            return res.status(400).json({ error: 'Invalid API key format. Please check your API key.' });
+        }
+        const result = saveEncryptedApiKey(trimmed);
+        if (!result.ok) {
+            return res.status(500).json({ error: result.error });
+        }
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message || 'Failed to save API key.' });
+    }
+});
+
 app.post('/api/transform', async (req, res) => {
     try {
-        const { schema, allSchemas, userPrompt, history, apiKey } = req.body;
+        const { schema, allSchemas, userPrompt, history } = req.body;
         
-        // Use API key from request body (if provided), fallback to environment variable
-        const apiKeyToUse = (apiKey && apiKey.trim()) || process.env.GEMINI_API_KEY;
+        const apiKeyToUse = getApiKeyForRequest(req);
         
         if (!apiKeyToUse) {
             return res.status(400).json({ 
@@ -215,11 +245,9 @@ app.post('/api/transform', async (req, res) => {
         // Create a new instance with the provided API key
         const genAIInstance = new GoogleGenerativeAI(apiKeyToUse);
         
-        // Use gemini-pro (most widely available model)
-        // Alternative models: gemini-1.5-pro, gemini-1.5-flash-latest
+        // Use gemini-3-flash-preview for text transformations
         const model = genAIInstance.getGenerativeModel({ 
-            // model: "gemini-2.5-flash",
-            model: "gemini-2.0-flash-exp",
+            model: "gemini-3-flash-preview",
             generationConfig: {
                 responseMimeType: "application/json",
                 responseSchema: responseSchema
@@ -456,7 +484,7 @@ app.post('/api/analyze-flow-image', upload.single('image'), handleMulterError, a
             return res.status(400).json({ error: "No image file provided" });
         }
 
-        const { apiKey, context } = req.body;
+        const { context } = req.body;
         
         // Parse context if provided (existing tables and stages)
         let existingContext = null;
@@ -468,8 +496,7 @@ app.post('/api/analyze-flow-image', upload.single('image'), handleMulterError, a
             }
         }
         
-        // Use API key from request body (if provided), fallback to environment variable
-        const apiKeyToUse = (apiKey && apiKey.trim()) || process.env.GEMINI_API_KEY;
+        const apiKeyToUse = getApiKeyForRequest(req);
         
         if (!apiKeyToUse) {
             return res.status(400).json({ 
@@ -487,9 +514,9 @@ app.post('/api/analyze-flow-image', upload.single('image'), handleMulterError, a
         // Create a new instance with the provided API key
         const genAIInstance = new GoogleGenerativeAI(apiKeyToUse);
         
-        // Use Gemini 2.0 with vision capabilities
+        // Use gemini-3-flash-preview for image/flow analysis
         const model = genAIInstance.getGenerativeModel({ 
-            model: "gemini-2.0-flash-exp",
+            model: "gemini-3-flash-preview",
             generationConfig: {
                 responseMimeType: "application/json",
                 responseSchema: imageAnalysisResponseSchema
@@ -926,10 +953,9 @@ app.post('/api/voice/command', uploadAudio.single('audio'), handleAudioMulterErr
             return res.status(400).json({ error: "No audio file provided" });
         }
 
-        const { apiKey, schema, allSchemas } = req.body;
+        const { schema, allSchemas } = req.body;
         
-        // Use API key from request body (if provided), fallback to environment variable
-        const apiKeyToUse = (apiKey && apiKey.trim()) || process.env.GEMINI_API_KEY;
+        const apiKeyToUse = getApiKeyForRequest(req);
         
         if (!apiKeyToUse) {
             return res.status(400).json({ 
@@ -947,9 +973,9 @@ app.post('/api/voice/command', uploadAudio.single('audio'), handleAudioMulterErr
         // Create a new instance with the provided API key
         const genAIInstance = new GoogleGenerativeAI(apiKeyToUse);
         
-        // Use Gemini 2.0 with audio support - it can process audio directly
+        // Use gemini-3-flash-preview for voice command (audio)
         const model = genAIInstance.getGenerativeModel({ 
-            model: "gemini-2.0-flash-exp", // Gemini 2.0 supports audio
+            model: "gemini-3-flash-preview",
             generationConfig: {
                 responseMimeType: "application/json",
                 responseSchema: responseSchema
@@ -1095,7 +1121,7 @@ app.post('/api/voice/command', uploadAudio.single('audio'), handleAudioMulterErr
             // Fallback: try to get transcript using a simpler model
             try {
                 const fallbackModel = genAIInstance.getGenerativeModel({ 
-                    model: "gemini-1.5-flash" 
+                    model: "gemini-3-flash-preview" 
                 });
                 const transcriptResult = await fallbackModel.generateContent([
                     "Transcribe this audio to text. Return only the transcribed text, nothing else.",
@@ -1109,7 +1135,7 @@ app.post('/api/voice/command', uploadAudio.single('audio'), handleAudioMulterErr
                 });
             } catch (fallbackError) {
                 res.status(400).json({ 
-                    error: "Audio processing not supported. Please ensure you're using a Gemini model that supports audio (gemini-2.0-flash-exp or gemini-1.5-pro).",
+                    error: "Audio processing not supported. Please ensure you're using a Gemini model that supports audio (e.g. gemini-3-flash-preview).",
                     details: audioError.message 
                 });
             }
@@ -1127,10 +1153,9 @@ app.post('/api/voice/chat-audio', uploadAudio.single('audio'), handleAudioMulter
             return res.status(400).json({ error: "No audio file provided" });
         }
 
-        const { apiKey, history, schema } = req.body;
+        const { history, schema } = req.body;
         
-        // Use API key from request body (if provided), fallback to environment variable
-        const apiKeyToUse = (apiKey && apiKey.trim()) || process.env.GEMINI_API_KEY;
+        const apiKeyToUse = getApiKeyForRequest(req);
         
         if (!apiKeyToUse) {
             return res.status(400).json({ 
@@ -1148,9 +1173,9 @@ app.post('/api/voice/chat-audio', uploadAudio.single('audio'), handleAudioMulter
         // Create a new instance with the provided API key
         const genAIInstance = new GoogleGenerativeAI(apiKeyToUse);
         
-        // Use Gemini 2.0 with audio support for chat
+        // Use gemini-3-flash-preview for voice chat (audio)
         const model = genAIInstance.getGenerativeModel({ 
-            model: "gemini-2.0-flash-exp", // Gemini 2.0 supports audio
+            model: "gemini-3-flash-preview",
             generationConfig: {
                 responseMimeType: "application/json",
                 responseSchema: {
@@ -1257,7 +1282,7 @@ Respond naturally and conversationally.`;
             // Fallback: try to get transcript using a simpler model
             try {
                 const fallbackModel = genAIInstance.getGenerativeModel({ 
-                    model: "gemini-1.5-flash" 
+                    model: "gemini-3-flash-preview" 
                 });
                 const transcriptResult = await fallbackModel.generateContent([
                     "Transcribe this audio to text. Return only the transcribed text, nothing else.",
@@ -1273,7 +1298,7 @@ Respond naturally and conversationally.`;
                 });
             } catch (fallbackError) {
                 res.status(400).json({ 
-                    error: "Audio processing not supported. Please ensure you're using a Gemini model that supports audio (gemini-2.0-flash-exp or gemini-1.5-pro).",
+                    error: "Audio processing not supported. Please ensure you're using a Gemini model that supports audio (e.g. gemini-3-flash-preview).",
                     details: audioError.message 
                 });
             }

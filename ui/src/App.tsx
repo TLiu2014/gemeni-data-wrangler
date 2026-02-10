@@ -304,10 +304,24 @@ function App() {
     }
   }, [db, conn, sampleDataLoaded]);
 
-  const handleApiKeySet = (key: string) => {
-    setApiKey(key);
-    sessionStorage.setItem('gemini_api_key', key);
-    setError(null); // Clear any previous errors
+  const handleApiKeySet = async (key: string) => {
+    const trimmed = key.trim();
+    setApiKey(trimmed);
+    sessionStorage.setItem('gemini_api_key', trimmed);
+    setError(null);
+    try {
+      const res = await fetch('/api/settings/api-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: trimmed })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(data.error || 'Failed to save API key on server.');
+      }
+    } catch (e) {
+      setError('Could not reach server to save API key. Key is stored for this session only.');
+    }
   };
 
   // Helper function to parse CSV line (handles quoted values)
